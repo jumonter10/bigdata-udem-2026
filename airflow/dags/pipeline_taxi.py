@@ -88,3 +88,4 @@ with DAG(
         "cargar_gold", sql_file="sql/copy_gold.sql", params={"entorno": ENTORNO}
     )
     elegir >> bronze >> silver >> gold >> cargar
+# Cambio inicial a prod
