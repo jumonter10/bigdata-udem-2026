@@ -1,0 +1,9 @@
+CONTROL,ACTUAL,ESPERADO,RESULTADO
+Diferencia de viajes contra origen,0,0,OK
+Empresas,2,2,OK
+Fechas del calendario,91,91,OK
+Filas del hecho,46715,46715,OK
+Grupos duplicados,0,0,OK
+Hechos sin dimension,0,0,OK
+Viajes totales,60268466,60268466,OK
+Zonas depuradas,262,262,OK
