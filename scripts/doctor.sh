@@ -20,6 +20,8 @@ for cmd in python3 java aws terraform snow jq zip; do
     esac
     if [[ "$cmd" == java && "$version" != *version* ]]; then
       fallo "java no funciona (¿falta instalar Java 17?): $version"
+    elif [[ "$cmd" == snow ]] && ! snow --version >/dev/null 2>&1; then
+      fallo "snow está instalado pero no funciona (¿cambió el Python de la imagen?): corre make reparar-entorno"
     else
       ok "$cmd: $version"
     fi
@@ -33,8 +35,35 @@ else
   info "session-manager-plugin no instalado (solo para make airflow-tunel)"
 fi
 
+msg "Entorno de Python (.venv)"
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+  fallo ".venv no existe: corre make reparar-entorno"
+else
+  VENV_VERSION="$("$VENV_DIR/bin/python" -c 'import platform; print(platform.python_version())' 2>/dev/null || true)"
+  if [[ "$VENV_VERSION" != "$VENV_PYTHON_VERSION".* ]]; then
+    fallo ".venv usa Python ${VENV_VERSION:-desconocido} y debe usar $VENV_PYTHON_VERSION: corre make reparar-entorno"
+  elif "$VENV_DIR/bin/python" -c 'import pyspark, pandas, snowflake.connector' >/dev/null 2>&1; then
+    ok ".venv usa Python $VENV_VERSION e importa pyspark, pandas y snowflake.connector"
+  else
+    fallo ".venv usa Python $VENV_VERSION pero no importa pyspark, pandas o snowflake.connector: corre make reparar-entorno"
+  fi
+fi
+
 msg "Configuración"
 info "PREFIX=$PREFIX  AWS_REGION=$AWS_REGION"
+if [[ "${PIPELINE_ENTORNO:-dev}" == "prod" ]]; then
+  fallo "PIPELINE_ENTORNO=prod en esta terminal: desde el Code Editor el entorno es siempre dev. Corre 'unset PIPELINE_ENTORNO' (o quítalo de tu .env y de ~/.bashrc)."
+else
+  ok "PIPELINE_ENTORNO=${PIPELINE_ENTORNO:-dev} (desde el Code Editor siempre es dev)"
+fi
+
+msg "Jars de Spark para S3 (cómputo code_editor)"
+JARS_DIR="${PIPELINE_JARS_DIR:-$HOME/.spark-jars}"
+if [[ -s "$JARS_DIR/hadoop-aws-3.3.4.jar" && -s "$JARS_DIR/aws-java-sdk-bundle-1.12.262.jar" ]]; then
+  ok "Jars de S3A en $JARS_DIR"
+else
+  fallo "Faltan los jars de S3A en $JARS_DIR: corre 'cd ~/bigdata && make jars-s3a'"
+fi
 
 msg "AWS"
 if CUENTA="$(account_id 2>/dev/null)" && [[ -n "$CUENTA" ]]; then
@@ -49,6 +78,17 @@ if [[ -n "$CUENTA" ]]; then
     ok "Bucket de estado de Terraform accesible"
   else
     fallo "Bucket de estado $(tfstate_bucket) no accesible (¿bootstrap desplegado?)"
+  fi
+fi
+
+msg "Rutas del lake"
+if [[ -n "$CUENTA" ]]; then
+  info "Bucket del lake: $(lake_bucket)"
+  info "dev escribe solo en s3://$(lake_bucket)/dev/ y prod solo en s3://$(lake_bucket)/prod/"
+  if avisar_rutas_antiguas_del_lake; then
+    ok "No hay carpetas del diseño anterior en la raíz del bucket"
+  else
+    info "No es un fallo: son restos del diseño anterior y ya nadie los lee"
   fi
 fi
 
