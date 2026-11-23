@@ -19,6 +19,10 @@ fi
 PREFIX="${PREFIX:-bigdata}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 export PREFIX AWS_REGION
+# Secretos de conexión a Snowflake: dev (rol BIGDATA_DEV) y prod (rol BIGDATA_PROD, solo lo lee la VM
+# de prod y los jobs de Glue que lanza). Los usan snowflake*.sh y la VM (refresh.env).
+export SECRETO_SNOWFLAKE="${PREFIX}/snowflake"
+export SECRETO_SNOWFLAKE_PROD="${PREFIX}/snowflake_prod"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 export TF_VAR_prefix="$PREFIX"
 export TF_VAR_aws_region="$AWS_REGION"
@@ -31,6 +35,76 @@ fi
 msg() { echo "==> $*"; }
 aviso() { echo "AVISO: $*" >&2; }
 error() { echo "ERROR: $*" >&2; exit 1; }
+
+# Entorno virtual del proyecto: siempre con Python 3.12. Los notebooks de la clase 5 y PySpark 3.5
+# lo necesitan, y no se puede depender de 'python3' del sistema: SageMaker actualiza la imagen del
+# Code Editor y /opt/conda/bin/python3 cambia de versión (pasó de 3.12 a 3.13).
+VENV_PYTHON_VERSION="3.12"
+VENV_DIR="$ROOT_DIR/.venv"
+
+buscar_uv() {
+  # Imprime la ruta de uv (en el PATH o en conda) o sale con 1 si no existe.
+  if command -v uv >/dev/null 2>&1; then
+    command -v uv
+  elif [[ -x /opt/conda/bin/uv ]]; then
+    echo /opt/conda/bin/uv
+  else
+    return 1
+  fi
+}
+
+venv_sano() {
+  # 0 si .venv existe, es Python 3.12 y puede importar pip y pyspark; 1 en cualquier otro caso
+  # (por ejemplo, cuando su Python era un enlace a conda y conda cambió de versión).
+  local py="$VENV_DIR/bin/python"
+  [[ -x "$py" ]] || return 1
+  "$py" -c "
+import sys
+import pip
+import pyspark
+sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)
+" >/dev/null 2>&1
+}
+
+crear_venv() {
+  # Borra .venv y lo crea de nuevo con Python 3.12: con uv si existe y, si no, con python3.12.
+  local uv_bin=""
+  uv_bin="$(buscar_uv)" || uv_bin=""
+  rm -rf "$VENV_DIR"
+  if [[ -n "$uv_bin" ]]; then
+    msg "Creando .venv con Python $VENV_PYTHON_VERSION (uv)"
+    "$uv_bin" venv --seed --python "$VENV_PYTHON_VERSION" "$VENV_DIR"
+  elif command -v "python$VENV_PYTHON_VERSION" >/dev/null 2>&1; then
+    msg "Creando .venv con python$VENV_PYTHON_VERSION (no hay uv)"
+    "python$VENV_PYTHON_VERSION" -m venv "$VENV_DIR"
+  else
+    error "No hay uv ni python$VENV_PYTHON_VERSION para crear .venv. Instala uv (https://docs.astral.sh/uv/) o Python $VENV_PYTHON_VERSION y repite."
+  fi
+  export PATH="$VENV_DIR/bin:$PATH"
+}
+
+instalar_dependencias_venv() {
+  # Instala requirements-dev.txt en .venv (con uv si existe; si no, con pip).
+  local requisitos="$ROOT_DIR/requirements-dev.txt" uv_bin=""
+  if [[ ! -f "$requisitos" ]]; then
+    aviso "No existe requirements-dev.txt; se omite la instalación de dependencias."
+    return 0
+  fi
+  uv_bin="$(buscar_uv)" || uv_bin=""
+  msg "Instalando dependencias de requirements-dev.txt"
+  if [[ -n "$uv_bin" ]]; then
+    "$uv_bin" pip install --quiet --python "$VENV_DIR/bin/python" -r "$requisitos"
+  else
+    "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
+    "$VENV_DIR/bin/python" -m pip install --quiet -r "$requisitos"
+  fi
+}
+
+registrar_kernel() {
+  # Registra .venv como el kernel de Jupyter «Python (bigdata)».
+  msg "Registrando el kernel «Python (bigdata)»"
+  "$VENV_DIR/bin/python" -m ipykernel install --user --name bigdata --display-name "Python (bigdata)" >/dev/null
+}
 
 requerir() {
   local cmd
@@ -64,7 +138,7 @@ account_id() {
   aws sts get-caller-identity --query Account --output text
 }
 
-CUENTA_AWS=""
+export CUENTA_AWS=""
 exigir_cuenta() {
   # Verifica la cuenta AWS real antes de cambiar infraestructura. Guarda el ID en CUENTA_AWS.
   local real
@@ -81,6 +155,55 @@ exigir_cuenta() {
 
 lake_bucket() {
   echo "${PREFIX}-lake-$(account_id)-${AWS_REGION}"
+}
+
+# --- Rutas del lake ---------------------------------------------------------------------------
+# Misma regla que ruta_lake (src/pipeline/herramientas/rutas.py): s3://<lake>/<entorno>/<capa>/<tabla>/...
+# dev y prod no comparten ningún prefijo. code/, dags/, logs/ y tmp/ son del lake, no de un entorno.
+ENTORNOS_LAKE="dev prod"
+CAPAS_LAKE="bronze silver gold"
+PREFIJOS_ANTIGUOS_LAKE="bronze muestra silver gold"  # diseño anterior: en la raíz del bucket
+
+s3_tiene_objetos() {
+  # Uso: s3_tiene_objetos <bucket> <prefijo>. Éxito si hay al menos un objeto bajo el prefijo.
+  local cuantos
+  cuantos="$(aws s3api list-objects-v2 --bucket "$1" --prefix "$2" --max-keys 1 \
+    --query 'KeyCount' --output text 2>/dev/null || echo 0)"
+  [[ "$cuantos" != "0" && "$cuantos" != "None" ]]
+}
+
+mostrar_rutas_del_lake() {
+  # Uso: mostrar_rutas_del_lake [con-estado]. Imprime el bucket y la carpeta de cada capa por
+  # entorno; con "con-estado" dice si la carpeta ya tiene datos (una consulta a S3 por carpeta).
+  local lake entorno capa estado
+  lake="$(lake_bucket)"
+  echo "  Bucket del lake: $lake"
+  for entorno in $ENTORNOS_LAKE; do
+    for capa in $CAPAS_LAKE; do
+      estado=""
+      if [[ "${1:-}" == "con-estado" ]]; then
+        if s3_tiene_objetos "$lake" "$entorno/$capa/"; then estado="con datos"; else estado="vacía"; fi
+      fi
+      printf "  s3://%s/%s/%s/  %s\n" "$lake" "$entorno" "$capa" "$estado"
+    done
+  done
+  echo "  Del lake, no de un entorno: code/  dags/  logs/  tmp/"
+}
+
+avisar_rutas_antiguas_del_lake() {
+  # Uso: avisar_rutas_antiguas_del_lake. Avisa si en la raíz del bucket quedan carpetas del diseño
+  # anterior (bronze/, muestra/...). Devuelve 1 si encontró alguna.
+  local lake prefijo encontradas=""
+  lake="$(lake_bucket)"
+  for prefijo in $PREFIJOS_ANTIGUOS_LAKE; do
+    if s3_tiene_objetos "$lake" "$prefijo/"; then
+      encontradas="$encontradas s3://$lake/$prefijo/"
+    fi
+  done
+  [[ -z "$encontradas" ]] && return 0
+  aviso "Quedan carpetas del diseño anterior:$encontradas"
+  aviso "Ya nadie las lee. Cómo moverlas o borrarlas: docs/rutas_del_lake.md"
+  return 1
 }
 
 tfstate_bucket() {

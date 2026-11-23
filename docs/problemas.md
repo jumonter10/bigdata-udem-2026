@@ -107,6 +107,24 @@ Busca tu mensaje con **Ctrl+F**. Cada entrada muestra el mensaje exacto, su caus
 - **Qué hacer:** `cd ~/bigdata && make snowflake-conexion` (el [paso 7](guia.md#paso-7)).
 - [Volver al paso 8](guia.md#paso-8)
 
+## Entorno de Python (después de actualizar el Code Editor)
+
+<a id="p-venv-roto"></a>
+### `No module named 'snowflake'` o `No module named 'pip'` en `.venv` tras reiniciar el Code Editor
+
+- **Síntoma:** al reiniciar el Code Editor, el notebook o la terminal dicen `ModuleNotFoundError: No module named 'snowflake'` (o `'pandas'`, `'pyspark'`), o `.venv/bin/python -m pip` responde `No module named pip`. `make doctor` marca `.venv` en `[FALLO]`.
+- **Causa:** SageMaker actualiza la imagen del Code Editor y cambia la versión de Python del sistema (`/opt/conda/bin/python3` pasó de 3.12 a 3.13). Tu `.venv` era solo un enlace a ese Python, así que ahora apunta a otra versión y deja de ver las librerías que instalaste. Con Python 3.13 tampoco sirve reinstalar a ciegas: `numpy 1.26.4` se compila desde el código fuente y PySpark 3.5 no es compatible.
+- **Qué hacer:** `cd ~/bigdata && make reparar-entorno`. El comando borra `.venv`, lo crea de nuevo con Python 3.12 (con `uv`), reinstala `requirements-dev.txt`, registra el kernel **Python (bigdata)** y revisa `snow`. Termina con `Entorno reparado: Python 3.12.x, snow OK`. Después elige de nuevo el kernel en tu notebook y reinícialo.
+- [Volver al paso 8](guia.md#paso-8)
+
+<a id="p-snow-cli"></a>
+### `No module named 'snowflake.cli'` al usar `snow`
+
+- **Síntoma:** cualquier comando `snow` (`snow --version`, `snow sql`, `make snowflake`) termina con `ModuleNotFoundError: No module named 'snowflake.cli'`.
+- **Causa:** `snow` se instaló con `pip install --user` sobre el Python de conda de la imagen anterior (3.12). Al actualizarse la imagen, ese Python cambió a 3.13 y las librerías del usuario de 3.12 ya no se ven.
+- **Qué hacer:** `cd ~/bigdata && make reparar-entorno` también comprueba `snow` y lo reinstala si falla. Si prefieres hacerlo a mano: `/opt/conda/bin/python3 -m pip install --user snowflake-cli` y luego `snow --version`.
+- [Volver al paso 8](guia.md#paso-8)
+
 ## Paso 9 · Secrets del fork
 
 <a id="p-ci-secrets"></a>
@@ -143,30 +161,40 @@ Busca tu mensaje con **Ctrl+F**. Cada entrada muestra el mensaje exacto, su caus
 - **Qué hacer:** `cd ~/bigdata && make deploy`. Sube `pipeline.zip` con la carpeta `pipeline/`.
 - [Volver al paso 12](guia.md#paso-12)
 
-## Paso 12 · Muestra
+## Paso 12 · Muestra (retirada en la clase 7)
 
 <a id="p-timeout-muestra"></a>
-### `make muestra` termina en TIMEOUT
-
-- **Síntoma:** el paso termina en `TIMEOUT`.
-<!-- AUTOR: el original no indica la causa del TIMEOUT -->
-- **Qué hacer:** repítelo con `cd ~/bigdata && make muestra`. Retoma desde lo que ya descargó.
-- [Volver al paso 12](guia.md#paso-12)
-
+<a id="p-cerre-terminal-muestra"></a>
 <a id="p-sin-muestra"></a>
-### No hay muestra para correr en local
+### `make muestra`, `make muestra-solo` o `make run-local` dicen «No rule to make target»
 
-- **Síntoma:** `make run-local`: "No hay muestra ... falta LAKE_BUCKET"
-- **Causa:** todavía no se generó la muestra.
-- **Qué hacer:** corre `cd ~/bigdata && make muestra` primero (una vez).
-- [Volver al paso 13.1](guia.md#paso-13-1)
+- **Síntoma:** el comando imprime `make: *** No rule to make target 'muestra'` (o `muestra-solo`, o `run-local`) y sale con error.
+- **Causa:** esos comandos se retiraron en la clase 7: ya no hay muestra ni modo local sobre el disco. Todo corre contra S3: dev en `s3://<LAKE>/dev/` y prod en `s3://<LAKE>/prod/`.
+- **Qué hacer:** usa `cd ~/bigdata && make correr PASO=bronze`. El crudo se descarga solo la primera vez. Si Spark se queja de los jars, corre antes `cd ~/bigdata && make jars-s3a`.
+- [Volver al paso 12](guia.md#paso-12) · [Volver al paso 13.1](guia.md#paso-13-1)
+
+<a id="p-sin-lote-en-dev"></a>
+### `No hay ningún lote completo en s3://.../dev/bronze/...`
+
+- **Síntoma:** un paso `silver` (o `muestra`) falla con `No hay ningún lote completo en s3://<LAKE>/dev/bronze/fhvhv/mes=2024-01`.
+- **Causa:** dev y prod no comparten carpetas. El crudo que ya tenías está en `prod/bronze/`, y dev solo lee `dev/bronze/`, que está vacío hasta que dev corra su propio paso `bronze`.
+- **Qué hacer:** corre primero el paso bronze en dev: `cd ~/bigdata && make correr PASO=bronze` (o la tarea `correr_bronze` del DAG `pipeline_taxi`). Descarga enero a `dev/bronze/_crudo/` y escribe el lote.
+- **Qué no hacer:** copiar a mano `prod/bronze/` hacia `dev/`: para eso está la tarea `bronze`. Si quieres ahorrar la descarga, los comandos están en [rutas_del_lake.md](rutas_del_lake.md#copiar-crudo-a-dev).
+- [Volver al paso 13.2](guia.md#paso-13-2)
+
+<a id="p-carpetas-antiguas"></a>
+### `Quedan carpetas del diseño anterior` (`make doctor`, `make estado` o `make deploy`)
+
+- **Síntoma:** el aviso lista `s3://<LAKE>/bronze/`, `muestra/`, `silver/` o `gold/` en la raíz del bucket.
+- **Causa:** tu bucket se llenó antes de que cada entorno tuviera su propia carpeta. Ya nadie lee esas carpetas: el pipeline lee y escribe solo bajo `dev/` o `prod/`.
+- **Qué hacer:** muévelas o bórralas con los comandos de [rutas_del_lake.md](rutas_del_lake.md#migrar). No es un error: solo ocupan espacio.
 
 ## Pipeline local (Java)
 
 <a id="p-java"></a>
 ### Java no es el correcto
 
-- **Síntoma:** `make test` o `make run-local` fallan por Java.
+- **Síntoma:** `make test` o `make correr` fallan por Java.
 - **Causa:** Java no está instalado o no es la versión validada (Java 17).
 - **Qué hacer:** instala Java 17 (versión con la que se validó PySpark 3.5) y revisa `cd ~/bigdata && java -version` y `JAVA_HOME`.
 - [Volver al paso 13.1](guia.md#paso-13-1)
@@ -269,6 +297,14 @@ Busca tu mensaje con **Ctrl+F**. Cada entrada muestra el mensaje exacto, su caus
 - **Síntoma:** `BIGDATA_WH: estado=STARTED` en `make estado`.
 - **Causa:** todavía no se ha suspendido: se suspende solo a los 60 s sin consultas.
 - **Qué hacer:** espera un minuto.
+
+<a id="p-control-watermark"></a>
+### No se encontró la tabla BIGDATA.CONTROL.WATERMARK
+
+- **Síntoma:** al consultar o registrar en la tabla de control (`consultar_watermark`, `registrar_watermark`, o una prueba del lab de la clase 5) sale `No se encontró la tabla BIGDATA.CONTROL.WATERMARK, o el rol ACCOUNTADMIN no tiene permiso sobre ella`. Si usas una versión anterior del repositorio, puede salir `Insufficient privileges to operate on database 'BIGDATA'`.
+- **Causa:** la base `BIGDATA` es del rol `TERRAFORM_ROLE`, y `ACCOUNTADMIN` no puede crear esquemas dentro de ella. Por eso el esquema `CONTROL`, la tabla y los permisos de `ACCOUNTADMIN` y `BIGDATA_DEV` los crea Terraform, y todavía no los has aplicado.
+- **Qué hacer:** `cd ~/bigdata && git pull && make snowflake` y escribe `yes` cuando pida confirmar el plan. Solo agrega recursos nuevos; después repite la celda.
+- [Volver al paso 11](guia.md#paso-11)
 
 <a id="avanzado"></a>
 ## Avanzado
